@@ -1,7 +1,8 @@
-#! /usr/bin/env python
+#! /usr/bin/env python2
 """
 kafka-reassign-optimizer.py
-  This scripts generates optimal replica assignment in terms of the number of replica move.
+  This scripts generates optimal replica assignment
+  in terms of the number of replica move.
   usage:
     kafka-reassign-optimizer.py < current_partition_replica_assignment.json
 
@@ -57,6 +58,8 @@ def propose_assignment_with_minimum_move(config):
     else:
         logger.info("balanced_load_min= %s", config.balanced_load_min)
         logger.info("balanced_load_max= %s", config.balanced_load_max)
+        logger.info("balanced_dataload_min= %s", config.balanced_dataload_min)
+        logger.info("balanced_dataload_max= %s", config.balanced_dataload_max)
 
     # binary integer programming instance
     problem = pulp.LpProblem(
@@ -121,6 +124,20 @@ def propose_assignment_with_minimum_move(config):
                 b, config.balanced_load_min)
             problem += score <= config.balanced_load_max, "load of broker %s is less than or equal to %s" % (
                 b, config.balanced_load_max)
+
+    # c4: new assignment is well_balanced in terms of dataset
+    for b in config.brokers:
+        dataset_score = 0
+        for (t, p) in config.tps:
+            dataset_score += config.partition_dataweights[(t, p)] * \
+                proposed_assignment[(t, p, b)]
+        if config.balanced_dataload_max == config.balanced_dataload_min:
+            problem += dataset_score == config.balanced_dataload_max, "dataload of broker %s is balanced." % b
+        else:
+            problem += dataset_score >= config.balanced_dataload_min, "dataload of broker %s is greater than or equal to %s" % (
+                b, config.balanced_dataload_min)
+            problem += dataset_score <= config.balanced_dataload_max, "dataload of broker %s is less than or equal to %s" % (
+                b, config.balanced_dataload_max)
 
     logger.debug("\n# Binary Integer Programming")
     logger.debug(problem)
@@ -244,6 +261,22 @@ class ReassignmentOptimizerConfig:
                 __partition_weights[(t, p)] = 1.0
         self.partition_weights = __partition_weights
 
+        self.partition_dataweights = None
+        __partition_dataweights = dict()
+        if self.__json.has_key("load"):
+            for j in self.__json["load"]:
+                t = j["topic"]
+                p = j["partition"]
+                w = j["load"]
+                if not __partition_dataweights.has_key((t, p)):
+                    if (t, p) in self.tps:
+                        __partition_dataweights[(t, p)] = w
+        else:
+            # defualt movement weight is all one.
+            for (t, p) in self.tps:
+                __partition_dataweights[(t, p)] = 1.0
+        self.partition_dataweights = __partition_dataweights
+
         if self.__json.has_key("balance_parameters"):
             if self.__json["balance_parameters"].has_key("min_factor"):
                 self.balance_min_factor = self.__json["balance_parameters"][
@@ -264,11 +297,23 @@ class ReassignmentOptimizerConfig:
             if self.current_assignment[(t, p, b)] == 1:
                 self.total_replica_weight += __partition_weights[(t, p)]
 
+        self.total_replica_dataweight = 0
+        for (t, p, b) in self.tpbs:
+            if self.current_assignment[(t, p, b)] == 1:
+                self.total_replica_dataweight += __partition_dataweights[(t, p)]
+
         self.balanced_load_min = int(
             math.floor(self.total_replica_weight / len(self.brokers) *
                        self.balance_min_factor))
         self.balanced_load_max = int(
             math.ceil(self.total_replica_weight / len(self.brokers) *
+                      self.balance_max_factor))
+
+        self.balanced_dataload_min = int(
+            math.floor(self.total_replica_dataweight / len(self.brokers) *
+                       self.balance_min_factor))
+        self.balanced_dataload_max = int(
+            math.ceil(self.total_replica_dataweight / len(self.brokers) *
                       self.balance_max_factor))
 
     #     _pweight = dict()
